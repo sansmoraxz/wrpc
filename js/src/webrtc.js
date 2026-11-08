@@ -38,7 +38,7 @@ const STOP = 3;
  * An ordered, reliable carrier of binary messages, as an `RTCDataChannel` is: what a
  * {@link Link} needs of one.
  * @typedef {object} Channel
- * @property {(message: Uint8Array) => void} send
+ * @property {(message: Uint8Array<ArrayBuffer>) => void} send
  * @property {number} bufferedAmount
  * @property {number} bufferedAmountLowThreshold
  * @property {string} readyState
@@ -278,7 +278,7 @@ export class Link {
     }
   }
 
-  /** @param {Uint8Array} message */
+  /** @param {Uint8Array<ArrayBuffer>} message */
   _send(message) {
     if (this.closed) return;
     try {

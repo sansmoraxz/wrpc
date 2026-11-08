@@ -268,7 +268,7 @@ export function fromWebStreams(duplex: {
  * {@link Link} needs of one.
  */
 export interface Channel {
-  send(message: Uint8Array): void;
+  send(message: Uint8Array<ArrayBuffer>): void;
   readonly bufferedAmount: number;
   bufferedAmountLowThreshold: number;
   readonly readyState: string;
