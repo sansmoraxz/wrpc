@@ -204,6 +204,7 @@ wasmtime-cli-flags = { version = "50", default-features = false }
 wasmtime-wasi = { version = "50", default-features = false }
 wasmtime-wasi-http = { version = "50", default-features = false }
 web-transport-quinn = { version = "0.13.5", default-features = false }
+webrtc = { version = "0.21.1", default-features = false }
 wit-bindgen = { version = "0.60", default-features = false }
 wit-bindgen-core = { version = "0.60", default-features = false }
 wit-bindgen-wrpc = { version = "0.13", default-features = false, path = "./crates/wit-bindgen" }
@@ -225,4 +226,5 @@ wrpc-wasi-keyvalue-mem = { version = "0.4", path = "./crates/wasi-keyvalue-mem",
 wrpc-wasi-keyvalue-redis = { version = "0.4", path = "./crates/wasi-keyvalue-redis", default-features = false }
 wrpc-wasmtime = { version = "0.2", path = "./crates/wasmtime", default-features = false }
 wrpc-wasmtime-cli = { version = "0.11", path = "./crates/wasmtime-cli", default-features = false }
+wrpc-webrtc = { version = "0.1", path = "./crates/webrtc", default-features = false }
 wrpc-webtransport = { version = "0.2", path = "./crates/webtransport", default-features = false }
