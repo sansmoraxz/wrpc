@@ -14,3 +14,4 @@ export { encodeValue, decodeValue, decodeSteps } from "./value.js";
 export { DISCARDED, Mux, Outgoing, PROTOCOL, fromWebStreams } from "./mux.js";
 export { fromFetch, fromRequest } from "./http.js";
 export { invoke, accept } from "./session.js";
+export { Link, MAX_MESSAGE } from "./webrtc.js";

@@ -263,6 +263,37 @@ export function fromWebStreams(duplex: {
   writable: WritableStream<Uint8Array>;
 }): Transport;
 
+/**
+ * An ordered, reliable carrier of binary messages, as an `RTCDataChannel` is: what a
+ * {@link Link} needs of one.
+ */
+export interface Channel {
+  send(message: Uint8Array): void;
+  readonly bufferedAmount: number;
+  bufferedAmountLowThreshold: number;
+  readonly readyState: string;
+  binaryType: string;
+  addEventListener(type: string, listener: (event: any) => void): void;
+  removeEventListener(type: string, listener: (event: any) => void): void;
+  close(): void;
+}
+
+/** The largest message a {@link Link} sends, its frame header included. */
+export const MAX_MESSAGE: number;
+
+/**
+ * Invocations multiplexed over one data channel, both ways, as `wrpc-webrtc` does in
+ * Rust: `open` gives the transport of an invocation of the peer's, `accept` the next one
+ * the peer opened. The two ends' `side` must differ.
+ */
+export class Link {
+  constructor(channel: Channel, side: "offer" | "answer");
+  readonly closed: boolean;
+  open(): Transport;
+  accept(): Promise<Transport | null>;
+  close(): void;
+}
+
 /** A handle to one (sub-)stream of the connection's write side. */
 export class Outgoing {
   constructor(mux: Mux, path: number[]);
