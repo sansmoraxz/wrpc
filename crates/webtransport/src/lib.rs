@@ -6,7 +6,7 @@ use core::task::{Context, Poll, ready};
 
 use anyhow::Context as _;
 use bytes::Bytes;
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader, ReadBuf};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncWrite, BufReader, ReadBuf};
 use web_transport_quinn::Session;
 use wrpc_transport::Invoke;
 use wrpc_transport::frame::{Incoming, Outgoing, invoke};
@@ -18,19 +18,37 @@ const ABORTED: u32 = 0;
 /// WebTransport server
 pub type Server = wrpc_transport::Server<(), RecvStream, SendStream>;
 
-/// Buffered receive side of a WebTransport stream, which stops the stream with WebTransport
-/// application error code `1` once dropped, signaling the peer that it is done receiving data
-pub struct RecvStream(BufReader<web_transport_quinn::RecvStream>);
+/// Buffered receive side of a WebTransport stream which, once dropped, stops the stream with
+/// WebTransport application error code `1` as soon as the peer sends more, signaling the peer
+/// that it is done receiving data. A peer that only finishes its side is left to finish:
+/// Firefox fails reads of a stream whose other direction was stopped, losing the results it
+/// was reading.
+pub struct RecvStream(Option<BufReader<web_transport_quinn::RecvStream>>);
 
 impl From<web_transport_quinn::RecvStream> for RecvStream {
     fn from(rx: web_transport_quinn::RecvStream) -> Self {
-        Self(BufReader::new(rx))
+        Self(Some(BufReader::new(rx)))
     }
 }
 
 impl Drop for RecvStream {
     fn drop(&mut self) {
-        _ = self.0.get_mut().stop(DONE);
+        let Some(mut rx) = self.0.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            _ = rx.get_mut().stop(DONE);
+            return;
+        };
+        runtime.spawn(async move {
+            // Ends with the stream finishing, the peer sending more, or the stream failing
+            match rx.fill_buf().await {
+                Ok([]) | Err(..) => {}
+                Ok(..) => {
+                    _ = rx.get_mut().stop(DONE);
+                }
+            }
+        });
     }
 }
 
@@ -40,17 +58,25 @@ impl AsyncRead for RecvStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+        match &mut self.get_mut().0 {
+            Some(rx) => Pin::new(rx).poll_read(cx, buf),
+            None => Poll::Ready(Ok(())),
+        }
     }
 }
 
 impl AsyncBufRead for RecvStream {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
-        Pin::new(&mut self.get_mut().0).poll_fill_buf(cx)
+        match &mut self.get_mut().0 {
+            Some(rx) => Pin::new(rx).poll_fill_buf(cx),
+            None => Poll::Ready(Ok(&[])),
+        }
     }
 
     fn consume(self: Pin<&mut Self>, amt: usize) {
-        Pin::new(&mut self.get_mut().0).consume(amt);
+        if let Some(rx) = &mut self.get_mut().0 {
+            Pin::new(rx).consume(amt);
+        }
     }
 }
 
