@@ -82,7 +82,7 @@ impl<D> StreamProducer<D> for IncomingProducer {
         dst: Destination<'a, Self::Item, Self::Buffer>,
         finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {
-        if dst.remaining(store.as_context_mut()) == Some(0) {
+        if dst.remaining(store.as_context_mut())? == Some(0) {
             return Poll::Ready(Ok(StreamResult::Completed));
         }
         let this = &mut *self;
@@ -102,7 +102,7 @@ impl<D> StreamProducer<D> for IncomingProducer {
             Poll::Pending => return Poll::Pending,
         };
         let mut dst = dst.as_direct(store, READ_CHUNK_SIZE);
-        let mut buf = ReadBuf::new(dst.remaining());
+        let mut buf = ReadBuf::new(dst.remaining()?);
         let res = Pin::new(incoming).poll_read(cx, &mut buf);
         match res {
             Poll::Ready(Ok(())) if buf.filled().is_empty() => {
@@ -163,10 +163,11 @@ impl<D> StreamConsumer<D> for OutgoingConsumer {
             Poll::Pending if finish => return Poll::Ready(Ok(StreamResult::Cancelled)),
             Poll::Pending => return Poll::Pending,
         };
-        if src.remaining().is_empty() {
+        let remaining = src.remaining()?;
+        if remaining.is_empty() {
             return Poll::Ready(Ok(StreamResult::Completed));
         }
-        let res = Pin::new(outgoing).poll_write(cx, src.remaining());
+        let res = Pin::new(outgoing).poll_write(cx, remaining);
         match res {
             Poll::Ready(Ok(n)) => {
                 src.mark_read(n);
