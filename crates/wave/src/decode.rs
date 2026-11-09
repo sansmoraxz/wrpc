@@ -6,12 +6,225 @@ use core::task::{Context, Poll, Waker};
 
 use std::borrow::Cow;
 
+#[cfg(feature = "transport")]
 use tokio::io::{AsyncRead, AsyncReadExt as _};
+#[cfg(feature = "transport")]
 use wasm_tokio::{
-    AsyncReadCore as _, AsyncReadLeb128 as _, AsyncReadUtf8 as _, DEFAULT_MAX_INITIAL_CAPACITY,
-    cm::AsyncReadValue as _,
+    AsyncReadCore as _, AsyncReadLeb128 as _, AsyncReadUtf8 as _, cm::AsyncReadValue as _,
 };
 use wasm_wave::wasm::{WasmType, WasmTypeKind, WasmValue};
+
+/// At most this many bytes are preallocated for a list, as `wasm-tokio` does
+const MAX_INITIAL_CAPACITY: usize = 1 << 20;
+
+/// Source of the primitives values are read from
+trait Read {
+    async fn read_bool(&mut self) -> std::io::Result<bool>;
+    async fn read_i8(&mut self) -> std::io::Result<i8>;
+    async fn read_u8(&mut self) -> std::io::Result<u8>;
+    async fn read_i16_leb128(&mut self) -> std::io::Result<i16>;
+    async fn read_u16_leb128(&mut self) -> std::io::Result<u16>;
+    async fn read_i32_leb128(&mut self) -> std::io::Result<i32>;
+    async fn read_u32_leb128(&mut self) -> std::io::Result<u32>;
+    async fn read_i64_leb128(&mut self) -> std::io::Result<i64>;
+    async fn read_u64_leb128(&mut self) -> std::io::Result<u64>;
+    async fn read_f32_le(&mut self) -> std::io::Result<f32>;
+    async fn read_f64_le(&mut self) -> std::io::Result<f64>;
+    async fn read_char_utf8(&mut self) -> std::io::Result<char>;
+    async fn read_core_name(&mut self, s: &mut String) -> std::io::Result<()>;
+    async fn read_option_status(&mut self) -> std::io::Result<bool>;
+    async fn read_result_status(&mut self) -> std::io::Result<bool>;
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()>;
+}
+
+/// [`Read`] of an [`AsyncRead`]
+#[cfg(feature = "transport")]
+struct AsyncReader<'a, R>(&'a mut R);
+
+#[cfg(feature = "transport")]
+impl<R: AsyncRead + Unpin> Read for AsyncReader<'_, R> {
+    async fn read_bool(&mut self) -> std::io::Result<bool> {
+        self.0.read_bool().await
+    }
+
+    async fn read_i8(&mut self) -> std::io::Result<i8> {
+        self.0.read_i8().await
+    }
+
+    async fn read_u8(&mut self) -> std::io::Result<u8> {
+        self.0.read_u8().await
+    }
+
+    async fn read_i16_leb128(&mut self) -> std::io::Result<i16> {
+        self.0.read_i16_leb128().await
+    }
+
+    async fn read_u16_leb128(&mut self) -> std::io::Result<u16> {
+        self.0.read_u16_leb128().await
+    }
+
+    async fn read_i32_leb128(&mut self) -> std::io::Result<i32> {
+        self.0.read_i32_leb128().await
+    }
+
+    async fn read_u32_leb128(&mut self) -> std::io::Result<u32> {
+        self.0.read_u32_leb128().await
+    }
+
+    async fn read_i64_leb128(&mut self) -> std::io::Result<i64> {
+        self.0.read_i64_leb128().await
+    }
+
+    async fn read_u64_leb128(&mut self) -> std::io::Result<u64> {
+        self.0.read_u64_leb128().await
+    }
+
+    async fn read_f32_le(&mut self) -> std::io::Result<f32> {
+        self.0.read_f32_le().await
+    }
+
+    async fn read_f64_le(&mut self) -> std::io::Result<f64> {
+        self.0.read_f64_le().await
+    }
+
+    async fn read_char_utf8(&mut self) -> std::io::Result<char> {
+        self.0.read_char_utf8().await
+    }
+
+    async fn read_core_name(&mut self, s: &mut String) -> std::io::Result<()> {
+        self.0.read_core_name(s).await
+    }
+
+    async fn read_option_status(&mut self) -> std::io::Result<bool> {
+        self.0.read_option_status().await
+    }
+
+    async fn read_result_status(&mut self) -> std::io::Result<bool> {
+        self.0.read_result_status().await
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        self.0.read_exact(buf).await?;
+        Ok(())
+    }
+}
+
+fn split_off<'a>(buf: &mut &'a [u8], n: usize) -> std::io::Result<&'a [u8]> {
+    let Some((head, tail)) = buf.split_at_checked(n) else {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    };
+    *buf = tail;
+    Ok(head)
+}
+
+fn split_leb128<T>(
+    buf: &mut &[u8],
+    decode: fn(&[u8], &mut usize) -> Result<T, leb128fmt::Error>,
+) -> std::io::Result<T> {
+    let mut n = 0;
+    let v = decode(buf, &mut n).map_err(|err| {
+        if err.is_more_bytes_needed() {
+            std::io::ErrorKind::UnexpectedEof.into()
+        } else {
+            io_error(err)
+        }
+    })?;
+    *buf = &buf[n..];
+    Ok(v)
+}
+
+fn split_status(buf: &mut &[u8], ty: &str) -> std::io::Result<bool> {
+    match split_off(buf, 1)?[0] {
+        0 => Ok(false),
+        1 => Ok(true),
+        n => Err(io_error(format!("invalid {ty} byte value `{n}`"))),
+    }
+}
+
+impl Read for &[u8] {
+    async fn read_bool(&mut self) -> std::io::Result<bool> {
+        split_status(self, "bool")
+    }
+
+    async fn read_i8(&mut self) -> std::io::Result<i8> {
+        Ok(split_off(self, 1)?[0].cast_signed())
+    }
+
+    async fn read_u8(&mut self) -> std::io::Result<u8> {
+        Ok(split_off(self, 1)?[0])
+    }
+
+    async fn read_i16_leb128(&mut self) -> std::io::Result<i16> {
+        split_leb128(self, leb128fmt::decode_sint_slice::<i16, 16>)
+    }
+
+    async fn read_u16_leb128(&mut self) -> std::io::Result<u16> {
+        split_leb128(self, leb128fmt::decode_uint_slice::<u16, 16>)
+    }
+
+    async fn read_i32_leb128(&mut self) -> std::io::Result<i32> {
+        split_leb128(self, leb128fmt::decode_sint_slice::<i32, 32>)
+    }
+
+    async fn read_u32_leb128(&mut self) -> std::io::Result<u32> {
+        split_leb128(self, leb128fmt::decode_uint_slice::<u32, 32>)
+    }
+
+    async fn read_i64_leb128(&mut self) -> std::io::Result<i64> {
+        split_leb128(self, leb128fmt::decode_sint_slice::<i64, 64>)
+    }
+
+    async fn read_u64_leb128(&mut self) -> std::io::Result<u64> {
+        split_leb128(self, leb128fmt::decode_uint_slice::<u64, 64>)
+    }
+
+    async fn read_f32_le(&mut self) -> std::io::Result<f32> {
+        let mut buf = [0; 4];
+        buf.copy_from_slice(split_off(self, 4)?);
+        Ok(f32::from_le_bytes(buf))
+    }
+
+    async fn read_f64_le(&mut self) -> std::io::Result<f64> {
+        let mut buf = [0; 8];
+        buf.copy_from_slice(split_off(self, 8)?);
+        Ok(f64::from_le_bytes(buf))
+    }
+
+    async fn read_char_utf8(&mut self) -> std::io::Result<char> {
+        let head = &self[..self.len().min(4)];
+        let s = match core::str::from_utf8(head) {
+            Ok(s) => s,
+            Err(err) if err.valid_up_to() > 0 => {
+                core::str::from_utf8(&head[..err.valid_up_to()]).map_err(io_error)?
+            }
+            Err(err) if err.error_len().is_some() => return Err(io_error(err)),
+            Err(_) => "",
+        };
+        let c = s.chars().next().ok_or(std::io::ErrorKind::UnexpectedEof)?;
+        *self = &self[c.len_utf8()..];
+        Ok(c)
+    }
+
+    async fn read_core_name(&mut self, s: &mut String) -> std::io::Result<()> {
+        let n = split_leb128(self, leb128fmt::decode_uint_slice::<u32, 32>)?;
+        let n = usize::try_from(n).unwrap_or(usize::MAX);
+        s.push_str(core::str::from_utf8(split_off(self, n)?).map_err(io_error)?);
+        Ok(())
+    }
+
+    async fn read_option_status(&mut self) -> std::io::Result<bool> {
+        split_status(self, "option status")
+    }
+
+    async fn read_result_status(&mut self) -> std::io::Result<bool> {
+        split_status(self, "result status").map(|err| !err)
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        buf.copy_from_slice(split_off(self, buf.len())?);
+        Ok(())
+    }
+}
 
 /// Read a value of type `ty` from `r`
 ///
@@ -20,11 +233,20 @@ use wasm_wave::wasm::{WasmType, WasmTypeKind, WasmValue};
 /// - [`UnexpectedEof`](std::io::ErrorKind::UnexpectedEof) if `r` ends before the value is complete
 /// - [`InvalidData`](std::io::ErrorKind::InvalidData) if the encoding is malformed
 /// - Any error returned by `r`
-#[allow(clippy::too_many_lines)]
+#[cfg(feature = "transport")]
 pub async fn read_value<V, R>(r: &mut R, ty: &V::Type) -> std::io::Result<V>
 where
     V: WasmValue,
     R: AsyncRead + Unpin,
+{
+    read(&mut AsyncReader(r), ty).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn read<V, R>(r: &mut R, ty: &V::Type) -> std::io::Result<V>
+where
+    V: WasmValue,
+    R: Read,
 {
     match ty.kind() {
         WasmTypeKind::Bool => Ok(V::make_bool(r.read_bool().await?)),
@@ -50,11 +272,10 @@ where
             let element_type = ty
                 .list_element_type()
                 .ok_or_else(|| io_error("list type missing element type"))?;
-            let mut elements = Vec::with_capacity(
-                n.min(DEFAULT_MAX_INITIAL_CAPACITY / mem::size_of::<V>().max(1)),
-            );
+            let mut elements =
+                Vec::with_capacity(n.min(MAX_INITIAL_CAPACITY / mem::size_of::<V>().max(1)));
             for _ in 0..n {
-                elements.push(Box::pin(read_value(r, &element_type)).await?);
+                elements.push(Box::pin(read(r, &element_type)).await?);
             }
             V::make_list(ty, elements).map_err(io_error)
         }
@@ -62,7 +283,7 @@ where
             let (names, types): (Vec<_>, Vec<_>) = ty.record_fields().unzip();
             let mut values = Vec::with_capacity(types.len());
             for ty in types {
-                values.push(Box::pin(read_value(r, &ty)).await?);
+                values.push(Box::pin(read(r, &ty)).await?);
             }
             V::make_record(ty, names.iter().map(AsRef::as_ref).zip(values)).map_err(io_error)
         }
@@ -70,7 +291,7 @@ where
             let element_types: Vec<_> = ty.tuple_element_types().collect();
             let mut elements = Vec::with_capacity(element_types.len());
             for element_type in element_types {
-                elements.push(Box::pin(read_value(r, &element_type)).await?);
+                elements.push(Box::pin(read(r, &element_type)).await?);
             }
             V::make_tuple(ty, elements).map_err(io_error)
         }
@@ -82,7 +303,7 @@ where
                 .and_then(|i| cases.get(i))
                 .ok_or_else(|| io_error(format!("unknown variant discriminant: {discriminant}")))?;
             let payload = match payload_type {
-                Some(payload_type) => Some(Box::pin(read_value(r, payload_type)).await?),
+                Some(payload_type) => Some(Box::pin(read(r, payload_type)).await?),
                 None => None,
             };
             V::make_variant(ty, name, payload).map_err(io_error)
@@ -101,7 +322,7 @@ where
                 let ty = ty
                     .option_some_type()
                     .ok_or_else(|| io_error("option type missing some type"))?;
-                Some(Box::pin(read_value(r, &ty)).await?)
+                Some(Box::pin(read(r, &ty)).await?)
             } else {
                 None
             };
@@ -114,7 +335,7 @@ where
                 .ok_or_else(|| io_error("result type missing ok/err types"))?;
             let payload_type = if ok { ok_type } else { err_type };
             let payload = match payload_type {
-                Some(ty) => Some(Box::pin(read_value(r, &ty)).await?),
+                Some(ty) => Some(Box::pin(read(r, &ty)).await?),
                 None => None,
             };
             V::make_result(ty, if ok { Ok(payload) } else { Err(payload) }).map_err(io_error)
@@ -138,11 +359,12 @@ where
 ///
 /// # Errors
 ///
-/// Returns the errors of [`read_value`] and [`InvalidData`](std::io::ErrorKind::InvalidData) if
-/// `buf` is not fully consumed.
+/// - [`UnexpectedEof`](std::io::ErrorKind::UnexpectedEof) if `buf` ends before the value is
+///   complete
+/// - [`InvalidData`](std::io::ErrorKind::InvalidData) if the encoding is malformed or `buf` is not
+///   fully consumed
 pub fn decode_value<V: WasmValue>(mut buf: &[u8], ty: &V::Type) -> std::io::Result<V> {
-    let Poll::Ready(v) =
-        pin!(read_value(&mut buf, ty)).poll(&mut Context::from_waker(Waker::noop()))
+    let Poll::Ready(v) = pin!(read(&mut buf, ty)).poll(&mut Context::from_waker(Waker::noop()))
     else {
         return Err(std::io::ErrorKind::WouldBlock.into());
     };
@@ -526,5 +748,137 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_decode_char_surrogate() {
+        let err = decode_sync(&Type::CHAR, &[0xED, 0xA0, 0x80]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_decode_char_truncated() {
+        let err = decode_sync(&Type::CHAR, &[0xF0, 0x9F, 0x98]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_decode_u16_overflow() {
+        let err = decode_sync(&Type::U16, &[0xFF, 0xFF, 0x04]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            decode_sync(&Type::U16, &[0xFF, 0xFF, 0x03])
+                .unwrap()
+                .unwrap_u16(),
+            u16::MAX
+        );
+    }
+
+    #[test]
+    fn test_decode_s16_overflow() {
+        let err = decode_sync(&Type::S16, &[0x80, 0x80, 0x7D]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            decode_sync(&Type::S16, &[0x80, 0x80, 0x7E])
+                .unwrap()
+                .unwrap_s16(),
+            i16::MIN
+        );
+    }
+
+    #[cfg(feature = "transport")]
+    #[test]
+    fn test_read_value_is_send() {
+        fn is_send<T: Send>(_: &T) {}
+        let mut r: &[u8] = &[42];
+        is_send(&read_value::<Value, _>(&mut r, &Type::list(Type::U8)));
+    }
+
+    /// `decode_value` takes what `read_value` takes, and refuses what it refuses, but a slice is
+    /// refused as malformed, not cut short, once no bytes could follow to make a `char`.
+    #[cfg(feature = "transport")]
+    #[test]
+    fn test_decode_value_as_read_value() -> anyhow::Result<()> {
+        use anyhow::Context as _;
+
+        let types = [
+            Type::BOOL,
+            Type::S8,
+            Type::U8,
+            Type::S16,
+            Type::U16,
+            Type::S32,
+            Type::U32,
+            Type::S64,
+            Type::U64,
+            Type::F32,
+            Type::CHAR,
+            Type::STRING,
+            Type::list(Type::S16),
+            Type::option(Type::U8),
+            Type::result(Some(Type::U8), None),
+            Type::enum_ty(["a", "b", "c"]).context("failed to create enum type")?,
+            Type::flags(["a", "b", "c", "d", "e", "f", "g", "h", "i"])
+                .context("failed to create flags type")?,
+        ];
+        let mut inputs = vec![vec![]];
+        for b0 in 0..=0xFF {
+            inputs.push(vec![b0]);
+            for b1 in [
+                0x00, 0x01, 0x3F, 0x40, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xFF,
+            ] {
+                inputs.push(vec![b0, b1]);
+                inputs.push(vec![b0, b1, 0x80]);
+                inputs.push(vec![b0, b1, 0x80, 0x80]);
+                inputs.push(vec![b0, b1, 0x80, 0x80, 0x00]);
+            }
+        }
+        for n in 1..=10 {
+            for last in 0..=0xFF {
+                for b in [0x80, 0xFF] {
+                    let mut input = vec![b; n];
+                    input.push(last);
+                    inputs.push(input);
+                }
+            }
+        }
+        for ty in &types {
+            for input in &inputs {
+                let mut r = input.as_slice();
+                let Poll::Ready(read) = pin!(read_value::<Value, _>(&mut r, ty))
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                else {
+                    panic!("reading a slice is pending");
+                };
+                let read = read.and_then(|v| {
+                    if r.is_empty() {
+                        Ok(v)
+                    } else {
+                        Err(io_error("trailing bytes"))
+                    }
+                });
+                match (read, decode_sync(ty, input)) {
+                    (Ok(read), Ok(decoded)) => {
+                        assert_eq!(
+                            format!("{read:?}"),
+                            format!("{decoded:?}"),
+                            "{ty:?} {input:x?}"
+                        );
+                    }
+                    (Err(read), Err(decoded)) => {
+                        let eof = std::io::ErrorKind::UnexpectedEof;
+                        if decoded.kind() == eof || ty != &Type::CHAR {
+                            assert_eq!(
+                                read.kind() == eof,
+                                decoded.kind() == eof,
+                                "{ty:?} {input:x?}: {read} / {decoded}"
+                            );
+                        }
+                    }
+                    (read, decoded) => panic!("{ty:?} {input:x?}: {read:?} / {decoded:?}"),
+                }
+            }
+        }
+        Ok(())
     }
 }

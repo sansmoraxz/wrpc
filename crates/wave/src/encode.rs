@@ -8,18 +8,18 @@ use std::collections::HashSet;
 
 use anyhow::{Context as _, bail};
 use bytes::{BufMut as _, BytesMut};
+#[cfg(feature = "transport")]
 use tokio_util::codec::Encoder;
 use tracing::instrument;
-use wasm_tokio::{CoreNameEncoder, Leb128Encoder, Utf8Codec};
 use wasm_wave::wasm::{WasmType, WasmTypeKind, WasmValue};
 
-/// [Encoder] of values of type `T`
+/// Encoder of values of type `T`, also a [`tokio_util::codec::Encoder`] with the `transport`
+/// feature
 ///
 /// Resources, futures and streams are not supported.
 ///
 /// ```
 /// use bytes::BytesMut;
-/// use tokio_util::codec::Encoder as _;
 /// use wasm_wave::value::{Type, Value};
 /// use wasm_wave::wasm::WasmValue as _;
 /// use wrpc_wave::ValueEncoder;
@@ -38,6 +38,18 @@ impl<'a, T: WasmType> ValueEncoder<'a, T> {
     #[must_use]
     pub fn new(ty: &'a T) -> Self {
         Self { ty }
+    }
+}
+
+fn put_uleb128(dst: &mut BytesMut, v: impl Into<u64>) {
+    if let Some((buf, n)) = leb128fmt::encode_u64(v.into()) {
+        dst.put_slice(&buf[..n]);
+    }
+}
+
+fn put_sleb128(dst: &mut BytesMut, v: impl Into<i64>) {
+    if let Some((buf, n)) = leb128fmt::encode_s64(v.into()) {
+        dst.put_slice(&buf[..n]);
     }
 }
 
@@ -76,16 +88,19 @@ fn flag_bits<'a, T: BitOrAssign + Shl<u8, Output = T> + From<u8>>(
     v
 }
 
-impl<V, T> Encoder<&V> for ValueEncoder<'_, T>
-where
-    V: WasmValue<Type = T>,
-    T: WasmType,
-{
-    type Error = anyhow::Error;
-
+impl<T: WasmType> ValueEncoder<'_, T> {
+    /// Encodes `val` into `dst`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `val` is not of type `T` or of a type that is not supported
     #[allow(clippy::too_many_lines)]
     #[instrument(level = "trace", skip_all)]
-    fn encode(&mut self, val: &V, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    pub fn encode<V: WasmValue<Type = T>>(
+        &mut self,
+        val: &V,
+        dst: &mut BytesMut,
+    ) -> anyhow::Result<()> {
         match val.kind() {
             WasmTypeKind::Bool => {
                 dst.reserve(1);
@@ -102,24 +117,30 @@ where
                 dst.put_u8(val.unwrap_u8());
                 Ok(())
             }
-            WasmTypeKind::S16 => Leb128Encoder
-                .encode(val.unwrap_s16(), dst)
-                .context("failed to encode s16"),
-            WasmTypeKind::U16 => Leb128Encoder
-                .encode(val.unwrap_u16(), dst)
-                .context("failed to encode u16"),
-            WasmTypeKind::S32 => Leb128Encoder
-                .encode(val.unwrap_s32(), dst)
-                .context("failed to encode s32"),
-            WasmTypeKind::U32 => Leb128Encoder
-                .encode(val.unwrap_u32(), dst)
-                .context("failed to encode u32"),
-            WasmTypeKind::S64 => Leb128Encoder
-                .encode(val.unwrap_s64(), dst)
-                .context("failed to encode s64"),
-            WasmTypeKind::U64 => Leb128Encoder
-                .encode(val.unwrap_u64(), dst)
-                .context("failed to encode u64"),
+            WasmTypeKind::S16 => {
+                put_sleb128(dst, val.unwrap_s16());
+                Ok(())
+            }
+            WasmTypeKind::U16 => {
+                put_uleb128(dst, val.unwrap_u16());
+                Ok(())
+            }
+            WasmTypeKind::S32 => {
+                put_sleb128(dst, val.unwrap_s32());
+                Ok(())
+            }
+            WasmTypeKind::U32 => {
+                put_uleb128(dst, val.unwrap_u32());
+                Ok(())
+            }
+            WasmTypeKind::S64 => {
+                put_sleb128(dst, val.unwrap_s64());
+                Ok(())
+            }
+            WasmTypeKind::U64 => {
+                put_uleb128(dst, val.unwrap_u64());
+                Ok(())
+            }
             WasmTypeKind::F32 => {
                 dst.reserve(4);
                 dst.put_f32_le(val.unwrap_f32());
@@ -130,19 +151,24 @@ where
                 dst.put_f64_le(val.unwrap_f64());
                 Ok(())
             }
-            WasmTypeKind::Char => Utf8Codec
-                .encode(val.unwrap_char(), dst)
-                .context("failed to encode char"),
-            WasmTypeKind::String => CoreNameEncoder
-                .encode(val.unwrap_string().as_ref(), dst)
-                .context("failed to encode string"),
+            WasmTypeKind::Char => {
+                let mut buf = [0; 4];
+                dst.put_slice(val.unwrap_char().encode_utf8(&mut buf).as_bytes());
+                Ok(())
+            }
+            WasmTypeKind::String => {
+                let s = val.unwrap_string();
+                let n = u32::try_from(s.len()).context("string length does not fit in u32")?;
+                dst.reserve(5 + s.len());
+                put_uleb128(dst, n);
+                dst.put_slice(s.as_bytes());
+                Ok(())
+            }
             WasmTypeKind::List => {
                 let elements: Vec<_> = val.unwrap_list().collect();
                 let n = u32::try_from(elements.len()).context("list length does not fit in u32")?;
                 dst.reserve(5 + elements.len());
-                Leb128Encoder
-                    .encode(n, dst)
-                    .context("failed to encode list length")?;
+                put_uleb128(dst, n);
                 let ty = self
                     .ty
                     .list_element_type()
@@ -177,25 +203,25 @@ where
                     ..=0x0000_00ff => {
                         let (discriminant, ty) = find_variant_discriminant(0u8.., cases, &case)?;
                         dst.reserve(2 + usize::from(payload.is_some()));
-                        Leb128Encoder.encode(discriminant, dst)?;
+                        put_uleb128(dst, discriminant);
                         ty
                     }
                     0x0000_0100..=0x0000_ffff => {
                         let (discriminant, ty) = find_variant_discriminant(0u16.., cases, &case)?;
                         dst.reserve(3 + usize::from(payload.is_some()));
-                        Leb128Encoder.encode(discriminant, dst)?;
+                        put_uleb128(dst, discriminant);
                         ty
                     }
                     0x0001_0000..=0x00ff_ffff => {
                         let (discriminant, ty) = find_variant_discriminant(0u32.., cases, &case)?;
                         dst.reserve(4 + usize::from(payload.is_some()));
-                        Leb128Encoder.encode(discriminant, dst)?;
+                        put_uleb128(dst, discriminant);
                         ty
                     }
                     0x0100_0000..=0xffff_ffff => {
                         let (discriminant, ty) = find_variant_discriminant(0u32.., cases, &case)?;
                         dst.reserve(5 + usize::from(payload.is_some()));
-                        Leb128Encoder.encode(discriminant, dst)?;
+                        put_uleb128(dst, discriminant);
                         ty
                     }
                     _ => bail!("case count does not fit in u32"),
@@ -216,22 +242,22 @@ where
                     ..=0x0000_00ff => {
                         let discriminant = find_enum_discriminant(0u8.., names, &case)?;
                         dst.reserve(2);
-                        Leb128Encoder.encode(discriminant, dst)?;
+                        put_uleb128(dst, discriminant);
                     }
                     0x0000_0100..=0x0000_ffff => {
                         let discriminant = find_enum_discriminant(0u16.., names, &case)?;
                         dst.reserve(3);
-                        Leb128Encoder.encode(discriminant, dst)?;
+                        put_uleb128(dst, discriminant);
                     }
                     0x0001_0000..=0x00ff_ffff => {
                         let discriminant = find_enum_discriminant(0u32.., names, &case)?;
                         dst.reserve(4);
-                        Leb128Encoder.encode(discriminant, dst)?;
+                        put_uleb128(dst, discriminant);
                     }
                     0x0100_0000..=0xffff_ffff => {
                         let discriminant = find_enum_discriminant(0u32.., names, &case)?;
                         dst.reserve(5);
-                        Leb128Encoder.encode(discriminant, dst)?;
+                        put_uleb128(dst, discriminant);
                     }
                     _ => bail!("name count does not fit in u32"),
                 }
@@ -378,6 +404,19 @@ where
             }
             kind => bail!("unsupported value type: {kind:?}"),
         }
+    }
+}
+
+#[cfg(feature = "transport")]
+impl<V, T> Encoder<&V> for ValueEncoder<'_, T>
+where
+    V: WasmValue<Type = T>,
+    T: WasmType,
+{
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, val: &V, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        ValueEncoder::encode(self, val, dst)
     }
 }
 

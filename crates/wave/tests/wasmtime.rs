@@ -1,5 +1,4 @@
 use bytes::BytesMut;
-use tokio_util::codec::Encoder as _;
 use wasm_wave::value::{Type, Value};
 use wasm_wave::wasm::WasmValue as _;
 use wasmtime::component::Val;

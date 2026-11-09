@@ -10,15 +10,20 @@ homepage.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["transport"]
+transport = ["dep:tokio", "dep:tokio-util", "dep:wasm-tokio", "dep:wrpc-transport"]
+
 [dependencies]
 anyhow = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
-tokio = { workspace = true, features = ["io-util"] }
-tokio-util = { workspace = true, features = ["codec"] }
+leb128fmt = { workspace = true }
+tokio = { workspace = true, features = ["io-util"], optional = true }
+tokio-util = { workspace = true, features = ["codec"], optional = true }
 tracing = { workspace = true, features = ["attributes"] }
-wasm-tokio = { workspace = true }
+wasm-tokio = { workspace = true, optional = true }
 wasm-wave = { workspace = true }
-wrpc-transport = { workspace = true }
+wrpc-transport = { workspace = true, optional = true }
 
 [dev-dependencies]
 wasmtime = { workspace = true, features = ["runtime", "wave"] }
