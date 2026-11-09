@@ -344,6 +344,9 @@ where
             let names: Vec<_> = ty.flags_names().collect();
             let mut buf = vec![0u8; names.len().div_ceil(8).max(1)];
             r.read_exact(&mut buf).await?;
+            if names.len() % 8 != 0 && buf[buf.len() - 1] >> (names.len() % 8) != 0 {
+                return Err(io_error("invalid flags bits"));
+            }
             let set = names
                 .iter()
                 .enumerate()
@@ -734,6 +737,21 @@ mod tests {
     fn test_decode_list_truncated() {
         let err = decode_sync(&Type::list(Type::U8), &[0xff, 0xff, 0xff, 0xff, 0x0f]).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_decode_flags_unknown_bits() -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        let flags_type =
+            Type::flags(["read", "write", "execute"]).context("failed to create flags type")?;
+        let err = decode_sync(&flags_type, &[0b0000_1000]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let flags_type = Type::flags(["f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9"])
+            .context("failed to create flags type")?;
+        let err = decode_sync(&flags_type, &[0x00, 0b0000_0100]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        decode_sync(&flags_type, &[0xFF, 0b0000_0011])?;
+        Ok(())
     }
 
     #[test]
